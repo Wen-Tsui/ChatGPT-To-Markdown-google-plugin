@@ -448,13 +448,24 @@ function htmlToMarkdown(html) {
         table.parentNode.replaceChild(document.createTextNode('\n' + markdown.trim() + '\n'), table);
     });
 
-    let markdown = doc.body.innerHTML.replace(/<[^>]*>/g, '');
-    markdown = markdown.replaceAll(/- &gt;/g, '- $\\gt$');
-    markdown = markdown.replaceAll(/>/g, '>');
-    markdown = markdown.replaceAll(/</g, '<');
-    markdown = markdown.replaceAll(/≥/g, '>=');
-    markdown = markdown.replaceAll(/≤/g, '<=');
-    markdown = markdown.replaceAll(/≠/g, '\\neq');
+    // 12. 处理引用块（只能处理一级引用，不能处理嵌套引用）
+    doc.querySelectorAll('blockquote').forEach(blockquote => {
+        const lines = blockquote.textContent.trim().split('\n');
+        const markdownQuote = lines.map(line => `> ${line.trim()}`).join('\n');
+        blockquote.parentNode.replaceChild(document.createTextNode('\n' + markdownQuote + '\n'), blockquote);
+    });
+
+    let markdown = doc.body.textContent || '';
 
     return markdown.trim();
+
+    // let markdown = doc.body.innerHTML.replace(/<[^>]*>/g, '');
+    // markdown = markdown.replaceAll(/- &gt;/g, '- $\\gt$');
+    // markdown = markdown.replaceAll(/>/g, '>');
+    // markdown = markdown.replaceAll(/</g, '<');
+    // markdown = markdown.replaceAll(/≥/g, '>=');
+    // markdown = markdown.replaceAll(/≤/g, '<=');
+    // markdown = markdown.replaceAll(/≠/g, '\\neq');
+
+    // return markdown.trim();
 }
