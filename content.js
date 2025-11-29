@@ -268,6 +268,171 @@ function createExportButton() {
     exportButton.addEventListener('click', exportChatAsMarkdown);
 }
 
+function sanitizeFileNamePart(part) {
+    if (!part) return 'chat';
+    return part
+        .replace(/[\\/:*?"<>|]/g, '')
+        .trim()
+        .replace(/\s+/g, '-')
+        .slice(0, 80) || 'chat';
+}
+
+function formatTimestamp(timestampMs) {
+    const date = new Date(timestampMs);
+    const pad = (value) => String(value).padStart(2, '0');
+    const year = date.getFullYear();
+    const month = pad(date.getMonth() + 1);
+    const day = pad(date.getDate());
+    const hours = pad(date.getHours());
+    const minutes = pad(date.getMinutes());
+    const seconds = pad(date.getSeconds());
+    return `${year}${month}${day}-${hours}${minutes}${seconds}`;
+}
+
+function getTextBySelectors(selectors) {
+    for (const selector of selectors) {
+        const element = document.querySelector(selector);
+        if (element) {
+            const text = element.textContent?.trim();
+            if (text) {
+                return text;
+            }
+        }
+    }
+    return '';
+}
+
+function getChatTitleFromDom() {
+    const documentTitle = document.title?.trim();
+    if (documentTitle) return documentTitle;
+
+    const rootWebArea = document.querySelector('[role="application"][aria-label], [role="main"][aria-label], [role="dialog"][aria-label], [role="region"][aria-label], [role="document"][aria-label]');
+    if (rootWebArea) {
+        const ariaLabel = rootWebArea.getAttribute('aria-label');
+        if (ariaLabel?.trim()) {
+            return ariaLabel.trim();
+        }
+    }
+
+
+    const conversationAreaSelectors = [
+        '[role="application"] h1',
+        '[role="application"] [aria-level="1"]',
+        '[role="document"] h1',
+        '[role="document"] [aria-level="1"]',
+        'main h1',
+        'main header h1',
+        'main [data-testid="conversation-title"]',
+        '[data-testid="conversation-view-title"]',
+        '[data-testid="conversation-headline"]',
+        '[data-testid="chat-title"]',
+        'main [role="heading"]',
+        '.conversation-header h1',
+        '.prose h1',
+        '.text-2xl.font-semibold.leading-tight'
+    ];
+
+    const contentTitle = getTextBySelectors(conversationAreaSelectors);
+    if (contentTitle) {
+        return contentTitle;
+    }
+
+    const activeSelectors = [
+        'nav a[aria-current="page"] h3',
+        'nav a[aria-current="page"] div',
+        '[role="treeitem"][aria-current="page"] h3',
+        '[role="treeitem"][aria-current="page"] div',
+        'nav a[data-active="true"] h3',
+        'nav a[data-active="true"] div',
+        '[data-testid="conversation-list-item"][data-selected="true"]',
+        '[data-testid="conversation-list-item"][aria-current="page"]',
+        'aside div[role="treeitem"][aria-selected="true"] h3',
+        'aside div[role="treeitem"][data-selected="true"] h3',
+        '.chat-item__title[aria-selected="true"]',
+        '.chat-item__title.is-active'
+    ];
+
+    const activeTitle = getTextBySelectors(activeSelectors);
+    if (activeTitle) {
+        return activeTitle;
+    }
+
+    const generalSelectors = [
+        'nav a[href^="/c/"] div',
+        'nav a[href^="/c/"] span',
+        '[data-testid="conversation-turn-title"]',
+        '[data-testid="conversation-name"]',
+        'aside div[role="treeitem"] h3',
+        '.chat-item__title'
+    ];
+
+    const generalTitle = getTextBySelectors(generalSelectors);
+    if (generalTitle) {
+        return generalTitle;
+    }
+
+    return '';
+}
+
+function extractTimestamp(element) {
+    if (!element) return null;
+
+    const attributeKeys = [
+        'data-message-timestamp',
+        'data-timestamp',
+        'data-created-at'
+    ];
+
+    for (const key of attributeKeys) {
+        const value = element.getAttribute ? element.getAttribute(key) : null;
+        if (!value) continue;
+        const numeric = Number(value);
+        if (!Number.isNaN(numeric) && numeric > 0) {
+            // 如果提供的是秒级时间戳，将其转换为毫秒
+            return numeric < 1e12 ? numeric * 1000 : numeric;
+        }
+        const parsedDate = Date.parse(value);
+        if (!Number.isNaN(parsedDate)) {
+            return parsedDate;
+        }
+    }
+
+    const timeEl = element.querySelector ? element.querySelector('time') : null;
+    if (timeEl) {
+        const datetimeValue = timeEl.getAttribute('datetime') || timeEl.textContent;
+        const parsedDate = Date.parse(datetimeValue);
+        if (!Number.isNaN(parsedDate)) {
+            return parsedDate;
+        }
+    }
+
+    return null;
+}
+
+function buildMarkdownFileName(allElements) {
+    if (!allElements || !allElements.length) {
+        const fallbackTimestamp = formatTimestamp(Date.now());
+        return `${fallbackTimestamp}-chat.md`;
+    }
+
+    let chatNameSource = getChatTitleFromDom();
+    if (!chatNameSource) {
+        for (let i = 0; i < allElements.length; i += 2) {
+            const candidate = allElements[i]?.textContent?.trim();
+            if (candidate) {
+                chatNameSource = candidate;
+                break;
+            }
+        }
+    }
+    const chatName = sanitizeFileNamePart(chatNameSource || 'chat');
+
+    const timestampMs = extractTimestamp(allElements[0]) ?? Date.now();
+    const timestampFormatted = formatTimestamp(timestampMs);
+
+    return `${timestampFormatted}-${chatName}.md`;
+}
+
 // 导出聊天记录为 Markdown 格式
 function exportChatAsMarkdown() {
     let markdownContent = "";
@@ -288,7 +453,8 @@ function exportChatAsMarkdown() {
     markdownContent = markdownContent.replace(/&amp;/g, '&');
 
     if (markdownContent) {
-        download(markdownContent, 'chat-export.md', 'text/markdown');
+        const filename = buildMarkdownFileName(allElements);
+        download(markdownContent, filename, 'text/markdown');
     } else {
         console.log("未找到对话内容");
     }
