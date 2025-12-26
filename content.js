@@ -100,13 +100,13 @@ function copyChatAsMarkdown() {
 
     for (let i = 0; i < allElements.length; i += 2) {
         if (!allElements[i + 1]) break; // 防止越界
-        let userText = allElements[i].textContent.trim();
+        let userHtml = allElements[i].innerHTML.trim();
         let answerHtml = allElements[i + 1].innerHTML.trim();
 
-        userText = htmlToMarkdown(userText);
+        userHtml = htmlToMarkdown(userHtml);
         answerHtml = htmlToMarkdown(answerHtml);
 
-        markdownContent += `\n# 用户问题\n${userText}\n# 回答\n${answerHtml}`;
+        markdownContent += `\n# 用户问题\n${userHtml}\n# 回答\n${answerHtml}`;
     }
 
     markdownContent = markdownContent.replace(/&amp;/g, '&');
@@ -277,6 +277,12 @@ function sanitizeFileNamePart(part) {
         .slice(0, 80) || 'chat';
 }
 
+function logDebug(...args) {
+    if (typeof console !== 'undefined' && console.log) {
+        console.log('[AI Chat Exporter]', ...args);
+    }
+}
+
 function formatTimestamp(timestampMs) {
     const date = new Date(timestampMs);
     const pad = (value) => String(value).padStart(2, '0');
@@ -433,54 +439,206 @@ function buildMarkdownFileName(allElements) {
     return `${timestampFormatted}-${chatName}.md`;
 }
 
+function buildFolderNameFromMarkdown(markdownFileName) {
+    const base = (markdownFileName || '').replace(/\.md$/i, '').trim();
+    return sanitizeFileNamePart(base || 'chat');
+}
+
+const IMAGE_EXTENSION_WHITELIST = new Set(['png', 'jpg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif']);
+const IMAGE_MIME_EXTENSION_MAP = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+    'image/bmp': 'bmp',
+    'image/svg+xml': 'svg',
+    'image/x-icon': 'ico',
+    'image/vnd.microsoft.icon': 'ico',
+    'image/avif': 'avif'
+};
+
+function normalizeImageSrc(rawSrc) {
+    if (!rawSrc) return '';
+    try {
+        return new URL(rawSrc, window.location.href).href;
+    } catch (error) {
+        return rawSrc;
+    }
+}
+
+function normalizeImageExtension(extension) {
+    if (!extension) return 'png';
+    const cleaned = extension.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (cleaned === 'jpeg') return 'jpg';
+    if (cleaned === 'svgxml') return 'svg';
+    if (cleaned === 'xicon') return 'ico';
+    if (IMAGE_EXTENSION_WHITELIST.has(cleaned)) return cleaned;
+    return 'png';
+}
+
+function getImageExtensionFromSrc(src) {
+    if (!src) return 'png';
+    if (src.startsWith('data:')) {
+        const match = src.match(/^data:image\/([^;]+);/i);
+        return normalizeImageExtension(match ? match[1] : 'png');
+    }
+    try {
+        const url = new URL(src);
+        const match = url.pathname.match(/\.([a-zA-Z0-9]+)$/);
+        if (match && match[1]) {
+            return normalizeImageExtension(match[1]);
+        }
+        const paramCandidates = ['format', 'fm', 'ext', 'type'];
+        for (const key of paramCandidates) {
+            const value = url.searchParams.get(key);
+            if (value) {
+                return normalizeImageExtension(value);
+            }
+        }
+    } catch (error) {
+        return 'png';
+    }
+    return 'png';
+}
+
+function mimeToExtension(contentType) {
+    if (!contentType) return '';
+    const mime = contentType.split(';')[0].trim().toLowerCase();
+    return IMAGE_MIME_EXTENSION_MAP[mime] || '';
+}
+
+async function resolveExtensionFromHead(src, guessedExt) {
+    if (!src || src.startsWith('data:') || src.startsWith('blob:')) {
+        return guessedExt;
+    }
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 4000);
+        const response = await fetch(src, {method: 'HEAD', credentials: 'include', signal: controller.signal});
+        clearTimeout(timeoutId);
+        if (!response.ok) return guessedExt;
+        const contentType = response.headers?.get('content-type');
+        const ext = mimeToExtension(contentType);
+        logDebug('HEAD resolved image ext', {src, contentType, ext, guessedExt});
+        return ext || guessedExt;
+    } catch (error) {
+        logDebug('HEAD resolve failed, fallback to guessed ext', {src, guessedExt, error: error?.message});
+        return guessedExt;
+    }
+}
+
+async function resolveImageExtension(src) {
+    const guessed = getImageExtensionFromSrc(src);
+    const resolved = await resolveExtensionFromHead(src, guessed);
+    return resolved || 'png';
+}
+
+function collectImageSources(allElements) {
+    const images = [];
+    const seen = new Set();
+    if (!allElements) return images;
+    allElements.forEach(element => {
+        if (!element || !element.querySelectorAll) return;
+        element.querySelectorAll('img').forEach(img => {
+            const rawSrc = img.currentSrc || img.getAttribute('src') || img.src;
+            const src = normalizeImageSrc(rawSrc);
+            if (!src || seen.has(src)) return;
+            seen.add(src);
+            images.push({src});
+        });
+    });
+    logDebug('Collected image sources', {count: images.length, samples: images.slice(0, 5)});
+    return images;
+}
+
+async function buildImagePlan(allElements) {
+    const images = collectImageSources(allElements);
+    const imageMap = new Map();
+    const extensions = await Promise.all(images.map(image => resolveImageExtension(image.src)));
+    const imageDownloads = images.map((image, index) => {
+        const extension = extensions[index] || 'png';
+        const safeExt = IMAGE_EXTENSION_WHITELIST.has(extension) ? extension : 'png';
+        const fileName = `image-${String(index + 1).padStart(2, '0')}.${safeExt}`;
+        const localPath = `images/${fileName}`;
+        imageMap.set(image.src, localPath);
+        const noQuery = image.src.split('?')[0];
+        if (noQuery && noQuery !== image.src) {
+            imageMap.set(noQuery, localPath);
+        }
+        return {src: image.src, fileName};
+    });
+    logDebug('Built image plan', {total: imageDownloads.length, imageDownloads: imageDownloads.slice(0, 5)});
+    return {imageMap, imageDownloads};
+}
+
+function requestExportDownload(payload) {
+    logDebug('Requesting export download', payload);
+    chrome.runtime.sendMessage(
+        {action: 'downloadChatExport', payload},
+        (response) => {
+            if (chrome.runtime.lastError) {
+                console.error('Export failed', chrome.runtime.lastError);
+                return;
+            }
+            if (!response || !response.success) {
+                console.error('Export failed', response?.error || 'Unknown error', response);
+            } else {
+                logDebug('Export download response', response);
+            }
+        }
+    );
+}
+
+async function downloadMarkdownWithDirectory({allElements, markdownContent, imagePlan}) {
+    if (!markdownContent) return;
+    const filename = buildMarkdownFileName(allElements);
+    const folderName = buildFolderNameFromMarkdown(filename);
+    const directoryName = folderName; // legacy alias to avoid ReferenceError
+    const {imageMap, imageDownloads} = imagePlan || await buildImagePlan(allElements);
+
+    logDebug('Preparing download', {folderName, filename, images: imageDownloads.length});
+
+    requestExportDownload({
+        folderName,
+        directoryName,
+        markdownFileName: filename,
+        markdownContent,
+        images: imageDownloads
+    });
+
+    return {folderName, markdownFileName: filename, imageMap};
+}
+
 // 导出聊天记录为 Markdown 格式
-function exportChatAsMarkdown() {
+async function exportChatAsMarkdown() {
     let markdownContent = "";
     let allElements = getConversationElements();
+    const imagePlan = await buildImagePlan(allElements);
+    const {imageMap} = imagePlan;
 
     for (let i = 0; i < allElements.length; i += 2) {
         if (!allElements[i + 1]) break; // 防止越界
-        let userText = allElements[i].textContent.trim();
+        let userHtml = allElements[i].innerHTML.trim();
         let answerHtml = allElements[i + 1].innerHTML.trim();
 
-        userText = htmlToMarkdown(userText);
-        answerHtml = htmlToMarkdown(answerHtml);
+        userHtml = htmlToMarkdown(userHtml, imageMap);
+        answerHtml = htmlToMarkdown(answerHtml, imageMap);
 
         // const isGrok = window.location.href.includes("grok.com");
         // markdownContent += `\n# 用户问题\n${userText}\n# ${isGrok ? 'Grok' : 'ChatGPT'}\n${answerHtml}`;
-        markdownContent += `\n# 用户问题\n${userText}\n# 回答\n${answerHtml}`;
+        markdownContent += `\n# 用户问题\n${userHtml}\n# 回答\n${answerHtml}`;
     }
     markdownContent = markdownContent.replace(/&amp;/g, '&');
 
     if (markdownContent) {
-        const filename = buildMarkdownFileName(allElements);
-        download(markdownContent, filename, 'text/markdown');
+        await downloadMarkdownWithDirectory({allElements, markdownContent, imagePlan});
     } else {
         console.log("未找到对话内容");
     }
 }
 
-// 下载函数
-function download(data, filename, type) {
-    var file = new Blob([data], {type: type});
-    if (window.navigator.msSaveOrOpenBlob) {
-        window.navigator.msSaveOrOpenBlob(file, filename);
-    } else {
-        var a = document.createElement('a'),
-            url = URL.createObjectURL(file);
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(function () {
-            document.body.removeChild(a);
-            window.URL.revokeObjectURL(url);
-        }, 0);
-    }
-}
-
 // 将 HTML 转换为 Markdown
-function htmlToMarkdown(html) {
+function htmlToMarkdown(html, imageMap) {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
 
@@ -529,7 +687,16 @@ function htmlToMarkdown(html) {
 
     // 6. 处理图片
     doc.querySelectorAll('img').forEach(img => {
-        const markdownImage = `![${img.alt}](${img.src})`;
+        const rawSrc = img.getAttribute('src') || img.src;
+        const normalizedSrc = normalizeImageSrc(rawSrc);
+        const normalizedNoQuery = normalizedSrc.split('?')[0];
+        let localPath = imageMap?.get(normalizedSrc) || imageMap?.get(normalizedNoQuery);
+        if (!localPath) {
+            localPath = normalizedSrc;
+        }
+        logDebug('Image markdown mapping', {rawSrc, normalizedSrc, normalizedNoQuery, localPath});
+        const alt = img.alt || 'image';
+        const markdownImage = `![${alt}](${localPath || normalizedSrc})`;
         img.parentNode.replaceChild(document.createTextNode(markdownImage), img);
     });
 
