@@ -444,7 +444,7 @@ function buildFolderNameFromMarkdown(markdownFileName) {
     return sanitizeFileNamePart(base || 'chat');
 }
 
-const IMAGE_EXTENSION_WHITELIST = new Set(['png', 'jpg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif']);
+const IMAGE_EXTENSION_WHITELIST = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif']);
 const IMAGE_MIME_EXTENSION_MAP = {
     'image/png': 'png',
     'image/jpeg': 'jpg',
@@ -470,10 +470,34 @@ function normalizeImageExtension(extension) {
     if (!extension) return 'png';
     const cleaned = extension.toLowerCase().replace(/[^a-z0-9]/g, '');
     if (cleaned === 'jpeg') return 'jpg';
+    if (cleaned === 'jpe' || cleaned === 'jfif' || cleaned === 'pjpeg' || cleaned === 'pjpg') return 'jpg';
     if (cleaned === 'svgxml') return 'svg';
     if (cleaned === 'xicon') return 'ico';
     if (IMAGE_EXTENSION_WHITELIST.has(cleaned)) return cleaned;
     return 'png';
+}
+
+function extractExtensionFromValue(value) {
+    if (!value) return '';
+    const candidates = Array.isArray(value) ? value : [value];
+    for (const candidate of candidates) {
+        if (!candidate) continue;
+        try {
+            const decoded = decodeURIComponent(candidate);
+            const urlCandidate = new URL(decoded, window.location.href);
+            const match = urlCandidate.pathname.match(/\.([a-zA-Z0-9]+)$/);
+            if (match && match[1]) {
+                return normalizeImageExtension(match[1]);
+            }
+        } catch (error) {
+            // ignore decode/URL parsing issues
+        }
+        const plainMatch = candidate.match(/\.([a-zA-Z0-9]+)(?:$|[?#])/);
+        if (plainMatch && plainMatch[1]) {
+            return normalizeImageExtension(plainMatch[1]);
+        }
+    }
+    return '';
 }
 
 function getImageExtensionFromSrc(src) {
@@ -488,11 +512,18 @@ function getImageExtensionFromSrc(src) {
         if (match && match[1]) {
             return normalizeImageExtension(match[1]);
         }
-        const paramCandidates = ['format', 'fm', 'ext', 'type'];
+        const paramCandidates = ['format', 'fm', 'ext', 'type', 'url', 'image_url', 'img', 'image', 'filename', 'file', 'name', 'src'];
         for (const key of paramCandidates) {
             const value = url.searchParams.get(key);
-            if (value) {
-                return normalizeImageExtension(value);
+            const extracted = extractExtensionFromValue(value);
+            if (extracted) {
+                return extracted;
+            }
+        }
+        for (const [, value] of url.searchParams.entries()) {
+            const extracted = extractExtensionFromValue(value);
+            if (extracted) {
+                return extracted;
             }
         }
     } catch (error) {
@@ -505,6 +536,19 @@ function mimeToExtension(contentType) {
     if (!contentType) return '';
     const mime = contentType.split(';')[0].trim().toLowerCase();
     return IMAGE_MIME_EXTENSION_MAP[mime] || '';
+}
+
+function heuristicExtensionByHost(src) {
+    try {
+        const url = new URL(src, window.location.href);
+        const host = url.hostname.toLowerCase();
+        const path = url.pathname.toLowerCase();
+        if (host.includes('bing.com') || host.includes('bing.net')) return 'jpg';
+        if (path.includes('/oip.')) return 'jpg';
+        return '';
+    } catch (error) {
+        return '';
+    }
 }
 
 async function resolveExtensionFromHead(src, guessedExt) {
@@ -527,10 +571,90 @@ async function resolveExtensionFromHead(src, guessedExt) {
     }
 }
 
+async function resolveExtensionFromGet(src, guessedExt) {
+    if (!src || src.startsWith('data:') || src.startsWith('blob:')) {
+        return guessedExt;
+    }
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        const response = await fetch(src, {
+            method: 'GET',
+            headers: {'Range': 'bytes=0-0'},
+            credentials: 'include',
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (!response.ok) return guessedExt;
+        const contentType = response.headers?.get('content-type');
+        const ext = mimeToExtension(contentType);
+        logDebug('GET resolved image ext', {src, contentType, ext, guessedExt});
+        return ext || guessedExt;
+    } catch (error) {
+        logDebug('GET resolve failed, fallback to guessed ext', {src, guessedExt, error: error?.message});
+        return guessedExt;
+    }
+}
+
+async function sniffExtensionFromBytes(src, guessedExt) {
+    if (!src || src.startsWith('data:') || src.startsWith('blob:')) {
+        return guessedExt;
+    }
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        const response = await fetch(src, {
+            method: 'GET',
+            headers: {'Range': 'bytes=0-15'},
+            credentials: 'include',
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (!response.ok) return guessedExt;
+        const buffer = await response.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'jpg';
+        if (
+            bytes.length >= 8 &&
+            bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
+            bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a
+        ) return 'png';
+        if (
+            bytes.length >= 6 &&
+            bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 &&
+            bytes[3] === 0x38 && (bytes[4] === 0x39 || bytes[4] === 0x37) && bytes[5] === 0x61
+        ) return 'gif';
+        if (bytes.length >= 2 && bytes[0] === 0x42 && bytes[1] === 0x4d) return 'bmp';
+        if (
+            bytes.length >= 12 &&
+            bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+            bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+        ) return 'webp';
+        if (
+            bytes.length >= 4 &&
+            bytes[0] === 0x00 && bytes[1] === 0x00 && bytes[2] === 0x01 && bytes[3] === 0x00
+        ) return 'ico';
+        if (
+            bytes.length >= 12 &&
+            bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70 &&
+            bytes[8] === 0x61 && bytes[9] === 0x76 && bytes[10] === 0x69 && bytes[11] === 0x66
+        ) return 'avif';
+        return guessedExt;
+    } catch (error) {
+        logDebug('Byte sniff failed, fallback to guessed ext', {src, guessedExt, error: error?.message});
+        return guessedExt;
+    }
+}
+
 async function resolveImageExtension(src) {
     const guessed = getImageExtensionFromSrc(src);
-    const resolved = await resolveExtensionFromHead(src, guessed);
-    return resolved || 'png';
+    const hostHeuristic = heuristicExtensionByHost(src);
+    const fromHead = await resolveExtensionFromHead(src, guessed);
+    const fromGet = await resolveExtensionFromGet(src, fromHead || guessed || hostHeuristic);
+    const fromBytes = await sniffExtensionFromBytes(src, fromGet || fromHead || hostHeuristic || guessed);
+    const finalExt = normalizeImageExtension(fromBytes || fromGet || fromHead || hostHeuristic || guessed || 'jpg');
+    logDebug('Image extension resolution', {src, guessed, hostHeuristic, fromHead, fromGet, fromBytes, finalExt});
+    return {finalExt, guessed, hostHeuristic, fromHead, fromGet, fromBytes};
 }
 
 function collectImageSources(allElements) {
@@ -556,7 +680,8 @@ async function buildImagePlan(allElements) {
     const imageMap = new Map();
     const extensions = await Promise.all(images.map(image => resolveImageExtension(image.src)));
     const imageDownloads = images.map((image, index) => {
-        const extension = extensions[index] || 'png';
+        const extResult = extensions[index] || {};
+        const extension = extResult.finalExt || 'png';
         const safeExt = IMAGE_EXTENSION_WHITELIST.has(extension) ? extension : 'png';
         const fileName = `image-${String(index + 1).padStart(2, '0')}.${safeExt}`;
         const localPath = `images/${fileName}`;
@@ -565,6 +690,14 @@ async function buildImagePlan(allElements) {
         if (noQuery && noQuery !== image.src) {
             imageMap.set(noQuery, localPath);
         }
+        logDebug('Image plan entry', {
+            index,
+            src: image.src,
+            fileName,
+            extension,
+            safeExt,
+            resolution: extResult
+        });
         return {src: image.src, fileName};
     });
     logDebug('Built image plan', {total: imageDownloads.length, imageDownloads: imageDownloads.slice(0, 5)});
