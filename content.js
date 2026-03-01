@@ -770,6 +770,76 @@ async function exportChatAsMarkdown() {
     }
 }
 
+function getNodeTextWithLineBreaks(node) {
+    if (!node) return '';
+    const clone = node.cloneNode(true);
+    clone.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
+    return clone.textContent || '';
+}
+
+function sanitizeCodeLanguage(candidate) {
+    const language = (candidate || '').trim();
+    if (!language || language.length > 30) return '';
+    if (/\s/.test(language)) return '';
+    if (!/^[a-zA-Z0-9+#_.-]+$/.test(language)) return '';
+    return language;
+}
+
+function normalizeCodeBlockContent(content) {
+    return (content || '')
+        .replace(/\r\n?/g, '\n')
+        .replace(/\u00a0/g, ' ')
+        .replace(/^\n+/, '')
+        .replace(/\n+$/, '');
+}
+
+function extractChatGPTCodeLanguage(pre) {
+    const candidates = [];
+    const copyButton = pre.querySelector('button[aria-label*="copy" i]');
+    if (copyButton) {
+        const buttonContainer = copyButton.closest('div');
+        const header = buttonContainer?.parentElement;
+        const languageNode = header?.firstElementChild;
+        if (languageNode) {
+            candidates.push(languageNode.textContent || '');
+        }
+    }
+    candidates.push(pre.getAttribute('data-language') || '');
+    candidates.push(pre.querySelector('code[class*="language-"]')?.className || '');
+
+    for (const candidate of candidates) {
+        const normalized = (candidate || '').trim();
+        if (!normalized) continue;
+        const classMatch = normalized.match(/language-([a-zA-Z0-9+#_.-]+)/);
+        const languageCandidate = classMatch ? classMatch[1] : normalized;
+        const language = sanitizeCodeLanguage(languageCandidate);
+        if (language) return language;
+    }
+    return '';
+}
+
+function extractChatGPTCodeContent(pre, language) {
+    const codeContainer = pre.querySelector('#code-block-viewer .cm-content') || pre.querySelector('.cm-content');
+    const explicitCode = pre.querySelector('code');
+
+    let content = '';
+    if (codeContainer) {
+        content = getNodeTextWithLineBreaks(codeContainer);
+    } else if (explicitCode) {
+        content = getNodeTextWithLineBreaks(explicitCode);
+    } else {
+        content = getNodeTextWithLineBreaks(pre);
+    }
+
+    content = normalizeCodeBlockContent(content);
+    content = content.replace(/^\s*Copy\s*\n+/i, '');
+    if (language) {
+        const escaped = language.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        content = content.replace(new RegExp(`^\\s*${escaped}\\s*\\n+`, 'i'), '');
+    }
+    return normalizeCodeBlockContent(content);
+}
+
 // 将 HTML 转换为 Markdown
 function htmlToMarkdown(html, imageMap) {
     const parser = new DOMParser();
@@ -836,9 +906,10 @@ function htmlToMarkdown(html, imageMap) {
     // 7. 代码块处理
     if (isChatGPT) {
         doc.querySelectorAll('pre').forEach(pre => {
-            const codeType = pre.querySelector('div > div:first-child')?.textContent || '';
-            const markdownCode = pre.querySelector('div > div:nth-child(3) > code')?.textContent || pre.textContent;
-            pre.innerHTML = `\n\`\`\`${codeType}\n${markdownCode}\n\`\`\``;
+            const codeType = extractChatGPTCodeLanguage(pre);
+            const markdownCode = extractChatGPTCodeContent(pre, codeType);
+            const markdownFence = `\n\`\`\`${codeType}\n${markdownCode}\n\`\`\`\n`;
+            pre.parentNode.replaceChild(doc.createTextNode(markdownFence), pre);
         });
     } else if (isGrok) {
         // 控制台打印
