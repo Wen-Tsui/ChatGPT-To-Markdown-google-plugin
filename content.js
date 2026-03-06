@@ -842,6 +842,13 @@ function extractChatGPTCodeContent(pre, language) {
 
 // 将 HTML 转换为 Markdown
 function htmlToMarkdown(html, imageMap) {
+    // ChatGPT 代码块中 <pre> 内嵌套了 <div>，但 HTML5 规范不允许 <pre> 包含
+    // flow content（如 <div>）。DOMParser 解析时会将 <div> 移出 <pre>，导致
+    // 代码块内容丢失和重复。将 <pre> 替换为自定义标签来避免 DOM 修正。
+    if (isChatGPT) {
+        html = html.replace(/<pre\b/gi, '<chatgpt-pre')
+                   .replace(/<\/pre\s*>/gi, '</chatgpt-pre>');
+    }
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
 
@@ -905,7 +912,7 @@ function htmlToMarkdown(html, imageMap) {
 
     // 7. 代码块处理
     if (isChatGPT) {
-        doc.querySelectorAll('pre').forEach(pre => {
+        doc.querySelectorAll('chatgpt-pre').forEach(pre => {
             const codeType = extractChatGPTCodeLanguage(pre);
             const markdownCode = extractChatGPTCodeContent(pre, codeType);
             const markdownFence = `\n\`\`\`${codeType}\n${markdownCode}\n\`\`\`\n`;
