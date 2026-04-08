@@ -67,7 +67,30 @@ function getConversationElements() {
     if (currentUrl.includes("openai.com") || currentUrl.includes("chatgpt.com")) {
         // ChatGPT 的对话选择器 - Select all message containers
         isChatGPT = true;
-        return document.querySelectorAll('div[data-message-id]');
+        // Thinking models produce multiple assistant div[data-message-id] per turn
+        // (thinking summary + response). Merge consecutive assistant messages to
+        // maintain the user/assistant alternation the i+=2 loop expects.
+        const allMsgDivs = document.querySelectorAll('div[data-message-id]');
+        const result = [];
+        let i = 0;
+        while (i < allMsgDivs.length) {
+            const role = allMsgDivs[i].getAttribute('data-message-author-role');
+            if (role === 'user') {
+                result.push(allMsgDivs[i]);
+                i++;
+            } else if (role === 'assistant') {
+                const merged = document.createElement('div');
+                while (i < allMsgDivs.length &&
+                       allMsgDivs[i].getAttribute('data-message-author-role') === 'assistant') {
+                    merged.innerHTML += allMsgDivs[i].innerHTML;
+                    i++;
+                }
+                result.push(merged);
+            } else {
+                i++;
+            }
+        }
+        return result;
     } else if (currentUrl.includes("grok.com")) {
         // Grok 的对话选择器：选择所有消息泡泡 (Keep as is, verify if Grok changed)
         isGrok = true;
